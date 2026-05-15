@@ -2,6 +2,7 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 import json
+import math
 
 _state = {
     'field_width': None,
@@ -11,12 +12,13 @@ _state = {
     'H_inv': None,
     'output_size': (720, 720),
     'aruco_dict': aruco.getPredefinedDictionary(aruco.DICT_6X6_250),
-    'aruco_params': aruco.DetectorParameters_create(),
+    'aruco_params': aruco.DetectorParameters(),
     'robot_trajectory': [],
     'edge_margin': 20,
     'obstacle_min_area': 500,
     'obstacle_max_area': 5000,
     'threshold': 100,
+    'robot_safety_radius': 15.0,
     'robot_radius': 15.0,
     'obstacle_safety_margin': 5.0,
     'planning_step': 2.0,
@@ -36,9 +38,10 @@ def set_obstacle_params(edge_margin: int = 20, min_area: int = 500,
     _state['obstacle_max_area'] = max_area
     _state['threshold'] = threshold
 
-def set_robot_params(robot_radius: float = 15.0, obstacle_safety_margin: float = 5.0,
+def set_robot_params(robot_radius: float = 15.0, robot_safety_radius: float = 40.0, obstacle_safety_margin: float = 5.0,
                      planning_step: float = 2.0, edge_limit_cm: float = 15.0):
     _state['robot_radius'] = robot_radius
+    _state['robot_safety_radius'] = robot_safety_radius
     _state['obstacle_safety_margin'] = obstacle_safety_margin
     _state['planning_step'] = planning_step
     _state['edge_limit_cm'] = edge_limit_cm
@@ -108,8 +111,10 @@ def transform_coordinates(x_pixel: float, y_pixel: float) -> tuple:
 # ========== ДЕТЕКЦИЯ ==========
 def detect_robot(frame: np.ndarray):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    corners, ids, rejected = cv2.aruco.detectMarkers(gray, _state['aruco_dict'],
-                                                      parameters=_state['aruco_params'])
+
+    detector = cv2.aruco.ArucoDetector(_state['aruco_dict'], _state['aruco_params'])
+    corners, ids, rejected = detector.detectMarkers(gray)
+
     if ids is not None and len(ids) > 0:
         marker_id = ids[0][0]
         marker_corners = corners[0][0]
@@ -123,6 +128,7 @@ def detect_robot(frame: np.ndarray):
         return True, marker_id, (center_x_rect, center_y_rect), (real_x, real_y), marker_corners
     return False, -1, (0, 0), (0, 0), None
 
+
 def detect_obstacles(rectified_frame: np.ndarray, robot_center: tuple = None) -> list:
     edge_margin = _state['edge_margin']
     min_area = _state['obstacle_min_area']
@@ -130,11 +136,17 @@ def detect_obstacles(rectified_frame: np.ndarray, robot_center: tuple = None) ->
     threshold = _state['threshold']
     output_size = _state['output_size']
     field_width = _state['field_width']
+    field_height = _state['field_height']
+    robot_radius = _state['robot_radius']
+    robot_safety_radius = _state.get('robot_safety_radius', robot_radius)
+    obstacle_safety = _state['obstacle_safety_margin']
+    edge_limit_cm = _state['edge_limit_cm']
 
     gray = cv2.cvtColor(rectified_frame, cv2.COLOR_BGR2GRAY)
     _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
 
-    kernel = np.ones((5, 5), np.uint8)
+    kernel = np.ones((2, 2), np.uint8)
+    kernel = np.ones((12, 12), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
@@ -144,44 +156,126 @@ def detect_obstacles(rectified_frame: np.ndarray, robot_center: tuple = None) ->
     mask[:, 0:edge_margin] = 0
     mask[:, w - edge_margin:w] = 0
 
+    robot_center_px = None
     if robot_center is not None:
-        robot_radius_px = int(_state['robot_radius'] / field_width * output_size[0])
+        robot_radius_px = int(robot_radius / field_width * output_size[0])
         cx = int(robot_center[0])
         cy = int(robot_center[1])
         if 0 <= cx < output_size[0] and 0 <= cy < output_size[1]:
             cv2.circle(mask, (cx, cy), robot_radius_px, 0, -1)
+            robot_center_px = (cx, cy)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    obstacles = []
-    safety_mask = np.zeros_like(mask)
+
+    all_ellipse_contours = []
+
+    edge_limit_px = int(edge_limit_cm / field_width * output_size[0])
+    min_robot_distance_px = int((robot_safety_radius + obstacle_safety) / field_width * output_size[0])
 
     for contour in contours:
         area = cv2.contourArea(contour)
         if area < min_area or area > max_area:
             continue
-        center = cv2.moments(contour)
-        if center["m00"] != 0:
-            center_x_rect = center["m10"] / center["m00"]
-            center_y_rect = center["m01"] / center["m00"]
+
+        M = cv2.moments(contour)
+        if M["m00"] != 0:
+            center_x = M["m10"] / M["m00"]
+            center_y = M["m01"] / M["m00"]
         else:
             continue
-        radius_px = int(np.sqrt(area / np.pi))
-        scale_avg = (_state['field_width'] / output_size[0] + _state['field_height'] / output_size[1]) / 2
-        radius_cm = radius_px * scale_avg
-        real_x = center_x_rect * (_state['field_width'] / output_size[0])
-        real_y = (output_size[1] - center_y_rect) * (_state['field_height'] / output_size[1])
-        obstacles.append({
-            'center_pixel': (center_x_rect, center_y_rect),
-            'center_real': (real_x, real_y),
-            'area': area,
-            'radius_px': radius_px,
-            'radius_cm': radius_cm,
-            'contour': contour
-        })
-        cv2.circle(safety_mask, (int(center_x_rect), int(center_y_rect)), radius_px, 255, -1)
 
-    _state['safety_mask'] = safety_mask
-    return obstacles
+        if (center_x < edge_limit_px or
+                center_x > output_size[0] - edge_limit_px or
+                center_y < edge_limit_px or
+                center_y > output_size[1] - edge_limit_px):
+            continue
+
+        if robot_center_px is not None:
+            dist_to_robot = math.hypot(center_x - robot_center_px[0], center_y - robot_center_px[1])
+            if dist_to_robot < min_robot_distance_px:
+                continue
+
+        # Находим минимальный ограничивающий прямоугольник (повернутый)
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        box = np.int32(box)
+
+        # Получаем размеры прямоугольника (ширина и высота)
+        width = rect[1][0]
+        height = rect[1][1]
+        angle = rect[2]  # угол поворота прямоугольника в градусах
+
+        # Полуоси эллипса - половина ширины и высоты прямоугольника
+        a = width / 2  # большая полуось
+        b = height / 2  # малая полуось
+
+        # Преобразуем угол в радианы
+        ellipse_angle = math.radians(angle)
+
+        # Добавляем safety margin к полуосям
+        safety_px = int((robot_radius + obstacle_safety) / field_width * output_size[0])
+        a_expanded = a + safety_px
+        b_expanded = b + safety_px
+
+        # Строим эллипс с расширенными полуосями
+        ellipse_contour = []
+        for deg in range(0, 360, 10):
+            rad = np.radians(deg)
+            # Параметрическое уравнение эллипса
+            x = center_x + a_expanded * np.cos(rad) * np.cos(ellipse_angle) - b_expanded * np.sin(rad) * np.sin(
+                ellipse_angle)
+            y = center_y + a_expanded * np.cos(rad) * np.sin(ellipse_angle) + b_expanded * np.sin(rad) * np.cos(
+                ellipse_angle)
+            ellipse_contour.append([int(x), int(y)])
+
+        all_ellipse_contours.append(np.array(ellipse_contour, dtype=np.int32))
+
+    # Объединяем пересекающиеся эллипсы
+    if len(all_ellipse_contours) > 0:
+        merged_mask = np.zeros((output_size[1], output_size[0]), dtype=np.uint8)
+
+        for contour in all_ellipse_contours:
+            cv2.fillPoly(merged_mask, [contour], 255)
+
+        merged_contours, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        obstacles = []
+        safety_mask = np.zeros_like(merged_mask)
+        scale_avg = (field_width / output_size[0] + field_height / output_size[1]) / 2
+
+        for merged_contour in merged_contours:
+            area = cv2.contourArea(merged_contour)
+            if area < min_area:
+                continue
+
+            M = cv2.moments(merged_contour)
+            if M["m00"] != 0:
+                center_x_rect = M["m10"] / M["m00"]
+                center_y_rect = M["m01"] / M["m00"]
+            else:
+                center_x_rect = 0
+                center_y_rect = 0
+
+            radius_px = int(np.sqrt(area / np.pi))
+            real_x = center_x_rect * (field_width / output_size[0])
+            real_y = (output_size[1] - center_y_rect) * (field_height / output_size[1])
+
+            obstacles.append({
+                'center_pixel': (center_x_rect, center_y_rect),
+                'center_real': (real_x, real_y),
+                'area': area,
+                'radius_px': radius_px,
+                'radius_cm': radius_px * scale_avg,
+                'contour': merged_contour,
+                'expanded_contour': merged_contour
+            })
+
+            cv2.fillPoly(safety_mask, [merged_contour], 255)
+
+        _state['safety_mask'] = safety_mask
+        return obstacles
+
+    return []
 
 # ========== ОТРИСОВКА ==========
 def draw_axes_2d(frame: np.ndarray, marker_corners: np.ndarray, axis_length: float = 60) -> np.ndarray:
@@ -277,6 +371,7 @@ def load_corners(corners_file: str) -> bool:
 def reset_trajectory():
     _state['robot_trajectory'] = []
 
+
 def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
     cap = cv2.VideoCapture(camera_id)
     if not cap.isOpened():
@@ -300,14 +395,21 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
     user_point_real = None
     current_robot_pos = None
     planner = None
+    current_path = None  # Сохраняем текущий путь
+    path_printed = False  # Для отладки
 
     def mouse_callback(event, x, y, flags, param):
-        nonlocal user_point, user_point_real, planner
+        nonlocal user_point, user_point_real, planner, current_path, path_printed
         if event == cv2.EVENT_LBUTTONDOWN:
             user_point = (x, y)
             real_x, real_y = transform_coordinates(x, y)
             user_point_real = (real_x, real_y)
-            planner = None
+            current_path = None  # Сбрасываем путь при новой цели
+            path_printed = False
+            if planner:
+                from planners.astar_planner import reset_path
+                reset_path(planner)
+            print(f"\nНовая цель: ({real_x:.1f}, {real_y:.1f})")
 
     cv2.setMouseCallback("Camera Feed", mouse_callback)
 
@@ -315,14 +417,18 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
     paused = False
     _state['robot_trajectory'] = []
 
-    from planners.greedy_planner import (
+    from planners.astar_planner import (
         create_planner, update_obstacles, draw_planning_contours,
         find_path, draw_path_on_frame
     )
 
+    import math
+
     while True:
         if not paused:
             ret, frame = cap.read()
+            if not ret:
+                break
             frame_count += 1
 
             rectified = cv2.warpPerspective(frame, _state['H'], _state['output_size'])
@@ -364,11 +470,33 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
             update_obstacles(planner, obstacles)
             rectified = draw_planning_contours(planner, rectified)
 
+            # Строим путь только если есть цель и робот
             if user_point_real is not None and found and current_robot_pos is not None:
-                path = find_path(planner, current_robot_pos, user_point_real)
-                if path:
-                    rectified = draw_path_on_frame(planner, rectified, path, (0, 255, 255))
+                # Проверяем, достиг ли робот цели
+                dist_to_goal = math.hypot(current_robot_pos[0] - user_point_real[0],
+                                          current_robot_pos[1] - user_point_real[1])
 
+                # Если робот достиг цели
+                if dist_to_goal < 5.0:
+                    if user_point_real is not None:
+                        print(f"Цель достигнута! Расстояние: {dist_to_goal:.1f} см")
+                        user_point_real = None
+                        user_point = None
+                        current_path = None
+                        if planner:
+                            from planners.astar_planner import reset_path
+                            reset_path(planner)
+                else:
+                    # Если нет пути, строим новый
+                    if current_path is None or len(current_path) == 0:
+                        current_path = find_path(planner, current_robot_pos, user_point_real)
+                        if current_path:
+                            print(f"Путь построен! Количество точек: {len(current_path)}")
+                        else:
+                            print("Не удалось построить путь!")
+
+            if current_path is not None and len(current_path) > 1:
+                rectified = draw_path_on_frame(planner, rectified, current_path, (0, 255, 0))
             if found:
                 cx = int(center_pixel[0])
                 cy = int(center_pixel[1])
@@ -377,9 +505,9 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
                 rectified = draw_axes_2d(rectified, marker_corners, axis_length=50)
 
             if user_point is not None:
-                cv2.circle(rectified, user_point, 8, (255, 0, 255), -1)
-                cv2.circle(rectified, user_point, 12, (255, 0, 255), 2)
+                cv2.circle(rectified, user_point, 8, (0, 255, 0), -1)
 
+            # Информация на экране
             info_y = 25
             cv2.putText(rectified, f"Obstacles: {len(obstacles)}", (10, info_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
@@ -393,6 +521,7 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
             if user_point_real is not None:
                 cv2.putText(rectified, f"Target: ({user_point_real[0]:.1f}, {user_point_real[1]:.1f})",
                             (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                info_y += 25
 
             if rectified.shape[1] > 800 or rectified.shape[0] > 800:
                 scale = min(800 / rectified.shape[1], 800 / rectified.shape[0])

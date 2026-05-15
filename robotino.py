@@ -19,12 +19,19 @@ def connect_to_robotino() -> bool:
 
 def send_velocity(vx: float, vy: float, omega: float = 0.0) -> bool:
     url = f"{BASE_URL}/data/omnidrive"
-    data = [vx, vy, omega]
 
-    response = requests.post(url, json=data, timeout=0.5)
-    if response.status_code == 200:
-        return True
-    else:
+    # Преобразуем numpy типы в обычные float
+    data = [float(vx), float(vy), float(omega)]
+
+    try:
+        response = requests.post(url, json=data, timeout=0.5)
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"Ошибка отправки скорости: статус {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"Ошибка отправки скорости: {e}")
         return False
 
 def stop_robot() -> bool:
