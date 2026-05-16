@@ -142,7 +142,7 @@ def find_best_exit_point(planner: dict, robot_pos: Tuple[float, float], goal_pos
 
                 # Итоговая оценка: 10% за направление, 90% за близость
                 # (важнее уехать от препятствия, чем двигаться в точку, чтобы робот не шел напролом)
-                score = direction_match * 0.1 + dist_score * 0.9
+                score = direction_match * 0.15 + dist_score * 0.85
 
                 if score > best_score:
                     best_score = score
@@ -402,11 +402,11 @@ def draw_planning_contours(planner: dict, frame: np.ndarray) -> np.ndarray:
         if 'expanded_contour' in obs:
             expanded_contour = obs['expanded_contour']
             if len(expanded_contour) > 2:
-                cv2.polylines(frame, [expanded_contour], True, (0, 255, 255), 2)
+                cv2.polylines(frame, [expanded_contour], True, (255, 0, 0), 2)
     return frame
 
 def draw_path_on_frame(planner: dict, frame: np.ndarray, path: List[Tuple[float, float]],
-                       color: Tuple[int, int, int] = (255, 0, 255)) -> np.ndarray:
+                       color: Tuple[int, int, int] = (0, 255, 0)) -> np.ndarray:
     if not path or len(path) < 2:
         return frame
 

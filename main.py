@@ -16,12 +16,12 @@ OBSTACLE_MAX_AREA = 500000
 THRESHOLD = 140
 ROBOT_SAFETY_RADIUS = 25.0
 ROBOT_RADIUS = 27.0
-OBSTACLE_SAFETY_MARGIN = 6.0
+OBSTACLE_SAFETY_MARGIN = 8.0
 PLANNING_STEP = 1.0
 
 # УПРАВЛЕНИЕ
 MAX_SPEED = 0.3
-SPEED_KP = 3.4
+SPEED_KP = 3.2
 ACC_SPEED_ERROR = 5.0
 MAX_OMEGA = 0.5
 ANGLE_KP = 0.5
@@ -343,7 +343,7 @@ def mode_robot_replanning():
 
         # Рисуем путь, только если он существует
         if path and len(path) > 1:
-            rectified = draw_path_on_frame(planner, rectified, path, (0, 255, 255))
+            rectified = draw_path_on_frame(planner, rectified, path, (0, 255, 0))
 
         # Отрисовка стартовой точки
         tx = int(start_point[0] / FIELD_WIDTH * rectified.shape[1])

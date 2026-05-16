@@ -145,8 +145,8 @@ def detect_obstacles(rectified_frame: np.ndarray, robot_center: tuple = None) ->
     gray = cv2.cvtColor(rectified_frame, cv2.COLOR_BGR2GRAY)
     _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
 
-    kernel = np.ones((5, 5), np.uint8)
-    kernel = np.ones((9, 9), np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    kernel = np.ones((13, 13), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
