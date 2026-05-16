@@ -33,7 +33,14 @@ def load_homography():
 
 def find_farthest_corners(corners):
     if len(corners) <= 4:
-        return corners
+        # Преобразуем в единый формат
+        result = []
+        for corner in corners:
+            if len(corner) == 2:
+                result.append([int(corner[0]), int(corner[1])])
+            else:
+                result.append([int(corner[0][0]), int(corner[0][1])])
+        return np.array(result, dtype=np.int32)
 
     points = []
     for corner in corners:
@@ -86,7 +93,6 @@ def find_farthest_corners(corners):
 
     return np.array(result, dtype=np.int32)
 
-
 def find_polygon_from_contour(contour, output_size, corner_quality=0.01, min_distance=20):
     M = cv2.moments(contour)
     if M["m00"] != 0:
@@ -124,14 +130,22 @@ def find_polygon_from_contour(contour, output_size, corner_quality=0.01, min_dis
         else:
             return None, None
     else:
-        farthest_corners = find_farthest_corners(corners)
+        # Преобразуем corners в единый формат перед передачей
+        formatted_corners = []
+        for corner in corners:
+            x, y = corner.ravel()
+            formatted_corners.append([x, y])
 
-        if len(farthest_corners) < 4:
+        farthest_corners = find_farthest_corners(formatted_corners)
+
+        if farthest_corners is None or len(farthest_corners) < 4:
             return None, None
 
+        # Сортируем углы по часовой стрелке
         center = np.mean(farthest_corners, axis=0)
 
         def sort_by_angle(point):
+            # point уже должен быть в формате [x, y]
             angle = math.atan2(point[1] - center[1], point[0] - center[0])
             return angle
 

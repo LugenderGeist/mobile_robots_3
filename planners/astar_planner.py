@@ -21,7 +21,8 @@ def create_planner(field_width: float, field_height: float, step: float,
         'grid_height': grid_height,
         'obstacles': [],
         'obstacle_map': np.zeros((grid_height, grid_width), dtype=np.uint8),
-        'path': []
+        'path': [],
+        'escape_path': []  # Путь для выезда из препятствия
     }
     return planner
 
@@ -64,31 +65,25 @@ def update_obstacles(planner: dict, obstacles: List[dict]):
                 if len(grid_points) >= 3:
                     grid_points = np.array(grid_points, dtype=np.int32)
 
-                    # Создаем временную маску
                     temp_mask = np.zeros_like(planner['obstacle_map'])
-                    # Закрашиваем внутренность контура (опасная зона)
                     cv2.fillPoly(temp_mask, [grid_points], 1)
-                    # Контур делаем безопасным (затираем его)
                     cv2.polylines(temp_mask, [grid_points], True, 0, 1)
-                    # Объединяем с основной картой
                     planner['obstacle_map'] = np.maximum(planner['obstacle_map'], temp_mask)
-
 
 def reset_path(planner: dict):
     planner['path'] = []
+    planner['escape_path'] = []
 
 def is_cell_safe(planner: dict, grid_x: int, grid_y: int) -> bool:
     if not (0 <= grid_x < planner['grid_width'] and 0 <= grid_y < planner['grid_height']):
         return False
 
-    # Внутри контура - опасно
     if planner['obstacle_map'][grid_y, grid_x] == 1:
         return False
 
     cx = (grid_x + 0.5) * planner['step']
     cy = (grid_y + 0.5) * planner['step']
 
-    # Проверка границ поля
     if (cx < planner['edge_limit_cm'] or
             cx > planner['field_width'] - planner['edge_limit_cm'] or
             cy < planner['edge_limit_cm'] or
@@ -97,16 +92,23 @@ def is_cell_safe(planner: dict, grid_x: int, grid_y: int) -> bool:
 
     return True
 
+def find_best_exit_point(planner: dict, robot_pos: Tuple[float, float], goal_pos: Tuple[float, float]) -> Tuple[
+    float, float]:
+    best_point = None
+    best_score = -float('inf')
 
-def find_nearest_contour_point(planner: dict, robot_pos: Tuple[float, float]) -> Tuple[float, float]:
-    min_dist = float('inf')
-    nearest_point = None
+    # Вектор от робота к цели
+    goal_vec_x = goal_pos[0] - robot_pos[0]
+    goal_vec_y = goal_pos[1] - robot_pos[1]
+    goal_vec_len = math.hypot(goal_vec_x, goal_vec_y)
+    if goal_vec_len > 0:
+        goal_vec_x /= goal_vec_len
+        goal_vec_y /= goal_vec_len
 
     for obs in planner['obstacles']:
         if 'expanded_contour' in obs:
             contour = obs['expanded_contour']
 
-            # Проходим по всем точкам контура
             for point in contour:
                 if len(point) == 2:
                     px, py = point
@@ -119,22 +121,63 @@ def find_nearest_contour_point(planner: dict, robot_pos: Tuple[float, float]) ->
                 real_x = px * (planner['field_width'] / rectified_width)
                 real_y = (rectified_height - py) * (planner['field_height'] / rectified_height)
 
-                dist = math.hypot(real_x - robot_pos[0], real_y - robot_pos[1])
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_point = (real_x, real_y)
+                # Расстояние от робота до точки
+                dist_to_robot = math.hypot(real_x - robot_pos[0], real_y - robot_pos[1])
+                if dist_to_robot < 1:  # Слишком близко, пропускаем
+                    continue
 
-    return nearest_point
+                # Вектор от робота к точке
+                point_vec_x = real_x - robot_pos[0]
+                point_vec_y = real_y - robot_pos[1]
+                point_vec_len = dist_to_robot
+                point_vec_x /= point_vec_len
+                point_vec_y /= point_vec_len
 
-def is_inside_any_contour(planner: dict, robot_pos: Tuple[float, float]) -> bool:
-    # Преобразуем позицию робота в индексы сетки
-    grid_x = int(robot_pos[0] / planner['step'])
-    grid_y = int(robot_pos[1] / planner['step'])
+                # Насколько направление к точке совпадает с направлением к цели (cos угла)
+                direction_match = point_vec_x * goal_vec_x + point_vec_y * goal_vec_y
 
-    if 0 <= grid_x < planner['grid_width'] and 0 <= grid_y < planner['grid_height']:
-        # Если клетка помечена как препятствие - робот внутри контура
-        return planner['obstacle_map'][grid_y, grid_x] == 1
-    return False
+                # Оценка: чем ближе точка и чем больше совпадает направление - тем лучше
+                # Чем меньше расстояние, тем выше оценка (до 1)
+                dist_score = 1.0 / (1.0 + dist_to_robot / 50.0)  # ~1 на 0см, ~0.5 на 50см
+
+                # Итоговая оценка: 10% за направление, 90% за близость
+                # (важнее уехать от препятствия, чем двигаться в точку, чтобы робот не шел напролом)
+                score = direction_match * 0.1 + dist_score * 0.9
+
+                if score > best_score:
+                    best_score = score
+                    best_point = (real_x, real_y)
+
+    return best_point
+
+def build_escape_path(planner: dict, start: Tuple[float, float], exit_point: Tuple[float, float],
+                      goal: Tuple[float, float]) -> List[Tuple[float, float]]:
+    if not exit_point:
+        return []
+
+    # Создаем путь: сначала к точке выхода, затем несколько точек в направлении цели
+    path = [start, exit_point]
+
+    # Добавляем промежуточные точки в направлении от exit_point к goal
+    goal_vec_x = goal[0] - exit_point[0]
+    goal_vec_y = goal[1] - exit_point[1]
+    goal_vec_len = math.hypot(goal_vec_x, goal_vec_y)
+    if goal_vec_len > 0:
+        goal_vec_x /= goal_vec_len
+        goal_vec_y /= goal_vec_len
+
+        # Добавляем 3 точки в направлении к цели
+        step_size = planner['step']
+        for i in range(1, 4):
+            next_x = exit_point[0] + goal_vec_x * step_size * i
+            next_y = exit_point[1] + goal_vec_y * step_size * i
+            path.append((next_x, next_y))
+
+    # Используем существующие функции интерполяции и сглаживания
+    path = interpolate_path(path, planner['step'])
+    path = smooth_path(path, factor=0.3)
+
+    return path
 
 def heuristic(x: int, y: int, goal_x: int, goal_y: int, step: float) -> float:
     dx = (x - goal_x) * step
@@ -154,16 +197,13 @@ def world_to_grid(planner: dict, x: float, y: float) -> Tuple[int, int]:
     grid_y = max(0, min(grid_y, planner['grid_height'] - 1))
     return grid_x, grid_y
 
-
 def grid_to_world(planner: dict, grid_x: int, grid_y: int) -> Tuple[float, float]:
     step = planner['step']
     return (grid_x + 0.5) * step, (grid_y + 0.5) * step
 
-
 def interpolate_path(path: List[Tuple[float, float]], step: float) -> List[Tuple[float, float]]:
     if len(path) < 2:
         return path
-
     interpolation_step = step / 2
     interpolated = []
 
@@ -186,7 +226,6 @@ def interpolate_path(path: List[Tuple[float, float]], step: float) -> List[Tuple
 
     interpolated.append(path[-1])
     return interpolated
-
 
 def smooth_path(path: List[Tuple[float, float]], factor: float = 0.3) -> List[Tuple[float, float]]:
     if len(path) < 3:
@@ -212,16 +251,44 @@ def smooth_path(path: List[Tuple[float, float]], factor: float = 0.3) -> List[Tu
     smoothed.append(path[-1])
     return smoothed
 
+
 def find_path(planner: dict, start: Tuple[float, float], goal: Tuple[float, float]) -> List[Tuple[float, float]]:
     # Проверяем, не находится ли робот внутри контура
-    actual_start = start
-    if is_inside_any_contour(planner, start):
-        nearest = find_nearest_contour_point(planner, start)
-        if nearest:
-            actual_start = nearest
+    grid_x = int(start[0] / planner['step'])
+    grid_y = int(start[1] / planner['step'])
+    is_inside = (0 <= grid_x < planner['grid_width'] and
+                 0 <= grid_y < planner['grid_height'] and
+                 planner['obstacle_map'][grid_y, grid_x] == 1)
+
+    if is_inside:
+        # Ищем лучшую точку выезда с учетом направления к цели
+        exit_point = find_best_exit_point(planner, start, goal)
+
+        if exit_point:
+            # Строим путь выезда с плавным переходом к цели
+            escape_path = build_escape_path(planner, start, exit_point, goal)
+            if escape_path:
+                planner['escape_path'] = escape_path
+                return escape_path
+            else:
+                return []
+        else:
             return []
 
-    start_grid = world_to_grid(planner, actual_start[0], actual_start[1])
+    # Если есть сохраненный путь выезда и мы еще не доехали до цели
+    if planner.get('escape_path') and len(planner['escape_path']) > 0:
+        # Проверяем, достигли ли мы конца пути выезда
+        current_dist = math.hypot(start[0] - planner['escape_path'][-1][0],
+                                  start[1] - planner['escape_path'][-1][1])
+        if current_dist < 10.0:  # Доехали до последней точки
+            planner['escape_path'] = []
+            # После выезда продолжаем выполнение для построения основного пути
+        else:
+            # Все еще едем по пути выезда
+            return planner['escape_path']
+
+    # Нормальный поиск пути A*
+    start_grid = world_to_grid(planner, start[0], start[1])
     goal_grid = world_to_grid(planner, goal[0], goal[1])
 
     if not is_cell_safe(planner, start_grid[0], start_grid[1]):
@@ -287,21 +354,26 @@ def find_path(planner: dict, start: Tuple[float, float], goal: Tuple[float, floa
 
 def get_velocities(planner: dict, current_x: float, current_y: float,
                    max_speed: float, kp: float, acc_speed_error: float) -> Tuple[float, float]:
-    path = planner['path']
-    if not path or len(path) < 2:
+    # Сначала проверяем, есть ли путь выезда
+    if planner.get('escape_path') and len(planner['escape_path']) > 1:
+        current_path = planner['escape_path']
+    else:
+        current_path = planner.get('path', [])
+
+    if not current_path or len(current_path) < 2:
         return 0.0, 0.0
 
     min_dist = float('inf')
     nearest_idx = 0
-    for i, point in enumerate(path):
+    for i, point in enumerate(current_path):
         px, py = point
         dist = math.hypot(px - current_x, py - current_y)
         if dist < min_dist:
             min_dist = dist
             nearest_idx = i
 
-    target_idx = min(nearest_idx + 7, len(path) - 1)
-    target_x, target_y = path[target_idx]
+    target_idx = min(nearest_idx + 7, len(current_path) - 1)
+    target_x, target_y = current_path[target_idx]
 
     error_x = target_x - current_x
     error_y = target_y - current_y
@@ -312,7 +384,7 @@ def get_velocities(planner: dict, current_x: float, current_y: float,
     max_speed_cm = max_speed * 100.0
     speed_cm = min(kp * error_distance, max_speed_cm)
 
-    final_goal = path[-1]
+    final_goal = current_path[-1]
     dist_to_final = math.hypot(final_goal[0] - current_x, final_goal[1] - current_y)
     if dist_to_final > acc_speed_error:
         speed_cm = max(speed_cm, min_speed_ms * 100.0)
@@ -324,7 +396,6 @@ def get_velocities(planner: dict, current_x: float, current_y: float,
         vx, vy = 0.0, 0.0
 
     return vx, -vy
-
 
 def draw_planning_contours(planner: dict, frame: np.ndarray) -> np.ndarray:
     for obs in planner['obstacles']:

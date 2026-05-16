@@ -145,8 +145,8 @@ def detect_obstacles(rectified_frame: np.ndarray, robot_center: tuple = None) ->
     gray = cv2.cvtColor(rectified_frame, cv2.COLOR_BGR2GRAY)
     _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
 
-    kernel = np.ones((2, 2), np.uint8)
-    kernel = np.ones((12, 12), np.uint8)
+    kernel = np.ones((5, 5), np.uint8)
+    kernel = np.ones((9, 9), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
@@ -396,20 +396,17 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
     current_robot_pos = None
     planner = None
     current_path = None  # Сохраняем текущий путь
-    path_printed = False  # Для отладки
 
     def mouse_callback(event, x, y, flags, param):
-        nonlocal user_point, user_point_real, planner, current_path, path_printed
+        nonlocal user_point, user_point_real, planner, current_path
         if event == cv2.EVENT_LBUTTONDOWN:
             user_point = (x, y)
             real_x, real_y = transform_coordinates(x, y)
             user_point_real = (real_x, real_y)
             current_path = None  # Сбрасываем путь при новой цели
-            path_printed = False
             if planner:
                 from planners.astar_planner import reset_path
                 reset_path(planner)
-            print(f"\nНовая цель: ({real_x:.1f}, {real_y:.1f})")
 
     cv2.setMouseCallback("Camera Feed", mouse_callback)
 
@@ -479,7 +476,6 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
                 # Если робот достиг цели
                 if dist_to_goal < 5.0:
                     if user_point_real is not None:
-                        print(f"Цель достигнута! Расстояние: {dist_to_goal:.1f} см")
                         user_point_real = None
                         user_point = None
                         current_path = None
@@ -490,10 +486,6 @@ def process_camera_feed(camera_id: int = 0, single_frame: bool = False):
                     # Если нет пути, строим новый
                     if current_path is None or len(current_path) == 0:
                         current_path = find_path(planner, current_robot_pos, user_point_real)
-                        if current_path:
-                            print(f"Путь построен! Количество точек: {len(current_path)}")
-                        else:
-                            print("Не удалось построить путь!")
 
             if current_path is not None and len(current_path) > 1:
                 rectified = draw_path_on_frame(planner, rectified, current_path, (0, 255, 0))
